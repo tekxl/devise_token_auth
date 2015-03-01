@@ -6,9 +6,15 @@ module DeviseTokenAuth
     def create
       # Check
       field = (resource_params.keys.map(&:to_sym) & resource_class.authentication_keys).first
+      
+      # Find user using mix attribute like login by using find_for_database_authentication method
+      # It should be customized by users
+      # See https://github.com/plataformatec/devise/wiki/How-To:-Allow-users-to-sign-in-using-their-username-or-email-address
 
-      @resource = nil
-      if field
+      @resource = resource_class.find_for_database_authentication(get_auth_params)
+      q_value = resource_params[field]
+      
+      if @resource.nil? and field
         q_value = resource_params[field]
 
         if resource_class.case_insensitive_keys.include?(field)
@@ -107,10 +113,7 @@ module DeviseTokenAuth
         auth_val.downcase!
       end
 
-      return {
-        key: auth_key,
-        val: auth_val
-      }
+      return { "#{auth_key}" =>  auth_val }
     end
   end
 end
