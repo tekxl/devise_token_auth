@@ -2,6 +2,13 @@
 module DeviseTokenAuth
   class SessionsController < DeviseTokenAuth::ApplicationController
     before_filter :set_user_by_token, :only => [:destroy]
+    after_action :reset_session, :only => [:destroy]
+
+    def new
+      render json: {
+        errors: [ I18n.t("devise_token_auth.sessions.not_supported")]
+      }, status: 405
+    end
 
     def create
       # Check
@@ -20,7 +27,7 @@ module DeviseTokenAuth
         @resource = resource_class.find_for_database_authentication(c)
       end
 
-      if @resource and valid_params?(field, q_value) and @resource.valid_password?(resource_params[:password]) and @resource.confirmed?
+      if @resource and valid_params?(field, q_value) and @resource.valid_password?(resource_params[:password]) and (!@resource.respond_to?(:active_for_authentication?) or @resource.active_for_authentication?)
         # create client id
         @client_id = SecureRandom.urlsafe_base64(nil, false)
         @token     = SecureRandom.urlsafe_base64(nil, false)
@@ -33,25 +40,21 @@ module DeviseTokenAuth
 
         sign_in(:user, @resource, store: false, bypass: false)
 
+        yield if block_given?
+
         render json: {
-          data: @resource.as_json(except: [
-            :tokens, :created_at, :updated_at
-          ])
+          data: @resource.token_validation_response
         }
 
-      elsif @resource and not @resource.confirmed?
+      elsif @resource and not (!@resource.respond_to?(:active_for_authentication?) or @resource.active_for_authentication?)
         render json: {
           success: false,
-          errors: [
-            "A confirmation email was sent to your account at #{@resource.email}. "+
-            "You must follow the instructions in the email before your account "+
-            "can be activated"
-          ]
+          errors: [ I18n.t("devise_token_auth.sessions.not_confirmed", email: @resource.email) ]
         }, status: 401
 
       else
         render json: {
-          errors: ["Invalid login credentials. Please try again."]
+          errors: [I18n.t("devise_token_auth.sessions.bad_credentials")]
         }, status: 401
       end
     end
@@ -66,23 +69,23 @@ module DeviseTokenAuth
         user.tokens.delete(client_id)
         user.save!
 
+        yield if block_given?
+
         render json: {
           success:true
         }, status: 200
 
       else
         render json: {
-          errors: ["User was not found or was not logged in."]
+          errors: [I18n.t("devise_token_auth.sessions.user_not_found")]
         }, status: 404
       end
     end
 
+    protected
+
     def valid_params?(key, val)
       resource_params[:password] && key && val
-    end
-
-    def resource_params
-      params.permit(devise_parameter_sanitizer.for(:sign_in))
     end
 
     def get_auth_params
@@ -108,5 +111,12 @@ module DeviseTokenAuth
         val: auth_val
       }
     end
+
+    private
+
+    def resource_params
+      params.permit(devise_parameter_sanitizer.for(:sign_in))
+    end
+
   end
 end
