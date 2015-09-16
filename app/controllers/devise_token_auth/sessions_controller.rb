@@ -66,10 +66,6 @@ module DeviseTokenAuth
       remove_instance_variable(:@token) if @token
 
       if user and client_id and user.tokens[client_id]
-        # Make sure to logout warden user
-        warden.logout
-        warden.clear_strategies_cache!
-
         user.tokens.delete(client_id)
         user.save!
 
