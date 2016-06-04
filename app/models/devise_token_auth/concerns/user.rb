@@ -27,22 +27,25 @@ module DeviseTokenAuth::Concerns::User
       serialize :tokens, JSON
     end
 
-    validates :email, presence: true, email: true, if: Proc.new { |u| u.provider == 'email' }
-    validates_presence_of :uid, if: Proc.new { |u| u.provider != 'email' }
-
-    # only validate unique emails among email registration users
-    validate :unique_email_user, on: :create
+    if DeviseTokenAuth.default_callbacks
+      include DeviseTokenAuth::Concerns::UserOmniauthCallbacks
+    end
 
     # can't set default on text fields in mysql, simulate here instead.
     after_save :set_empty_token_hash
     after_initialize :set_empty_token_hash
 
-    # keep uid in sync with email
-    before_save :sync_uid
-    before_create :sync_uid
-
     # get rid of dead tokens
     before_save :destroy_expired_tokens
+
+    # remove old tokens if password has changed
+    before_save :remove_tokens_after_password_reset
+
+    # allows user to change password without current_password
+    attr_writer :allow_password_change
+    def allow_password_change
+      @allow_password_change || false
+    end
 
     # don't use default devise email validation
     def email_required?
@@ -67,6 +70,7 @@ module DeviseTokenAuth::Concerns::User
       if pending_reconfirmation?
         opts[:to] = unconfirmed_email
       end
+      opts[:redirect_url] ||= DeviseTokenAuth.default_confirm_success_url
 
       send_devise_notification(:confirmation_instructions, @raw_confirmation_token, opts)
     end
@@ -88,7 +92,7 @@ module DeviseTokenAuth::Concerns::User
 
   module ClassMethods
     protected
-    
+
 
     def tokens_has_json_column_type?
       table_exists? && self.columns_hash['tokens'] && self.columns_hash['tokens'].type.in?([:json, :jsonb])
@@ -173,8 +177,6 @@ module DeviseTokenAuth::Concerns::User
       updated_at: Time.now
     }
 
-    self.save!
-
     return build_auth_header(token, client_id)
   end
 
@@ -186,12 +188,20 @@ module DeviseTokenAuth::Concerns::User
     # must be cast as string or headers will break
     expiry = self.tokens[client_id]['expiry'] || self.tokens[client_id][:expiry]
 
+    max_clients = DeviseTokenAuth.max_number_of_devices
+    while self.tokens.keys.length > 0 and max_clients < self.tokens.keys.length
+      oldest_token = self.tokens.min_by { |cid, v| v[:expiry] || v["expiry"] }
+      self.tokens.delete(oldest_token.first)
+    end
+
+    self.save!
+
     return {
-      "access-token" => token,
-      "token-type"   => "Bearer",
-      "client"       => client_id,
-      "expiry"       => expiry.to_s,
-      "uid"          => self.uid
+      DeviseTokenAuth.headers_names[:"access-token"] => token,
+      DeviseTokenAuth.headers_names[:"token-type"]   => "Bearer",
+      DeviseTokenAuth.headers_names[:"client"]       => client_id,
+      DeviseTokenAuth.headers_names[:"expiry"]       => expiry.to_s,
+      DeviseTokenAuth.headers_names[:"uid"]          => self.uid
     }
   end
 
@@ -206,7 +216,6 @@ module DeviseTokenAuth::Concerns::User
 
   def extend_batch_buffer(token, client_id)
     self.tokens[client_id]['updated_at'] = Time.now
-    self.save!
 
     return build_auth_header(token, client_id)
   end
@@ -224,19 +233,8 @@ module DeviseTokenAuth::Concerns::User
 
   protected
 
-  # only validate unique email among users that registered by email
-  def unique_email_user
-    if provider == 'email' and self.class.where(provider: 'email', email: email).count > 0
-      errors.add(:email, :already_in_use, default: "address is already in use")
-    end
-  end
-
   def set_empty_token_hash
     self.tokens ||= {} if has_attribute?(:tokens)
-  end
-
-  def sync_uid
-    self.uid = email if provider == 'email'
   end
 
   def destroy_expired_tokens
@@ -245,6 +243,17 @@ module DeviseTokenAuth::Concerns::User
         expiry = v[:expiry] || v["expiry"]
         DateTime.strptime(expiry.to_s, '%s') < Time.now
       end
+    end
+  end
+
+  def remove_tokens_after_password_reset
+    there_is_more_than_one_token = self.tokens && self.tokens.keys.length > 1
+    should_remove_old_tokens = DeviseTokenAuth.remove_tokens_after_password_reset &&
+                               encrypted_password_changed? && there_is_more_than_one_token
+
+    if should_remove_old_tokens
+      latest_token = self.tokens.max_by { |cid, v| v[:expiry] || v["expiry"] }
+      self.tokens = { latest_token.first => latest_token.last }
     end
   end
 
